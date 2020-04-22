@@ -495,8 +495,9 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
             roundkey = ''.join(["%02X" % x for x in key])
             if verbose>0:
                 print(roundkey)
-            return bytes(key), idx
-    return None, idx
+            return key, idx, candidates
+    return key, idx, candidates
+    # return None, idx, candidates
 
 def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
     Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
