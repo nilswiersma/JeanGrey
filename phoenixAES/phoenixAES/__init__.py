@@ -346,7 +346,7 @@ def rewind(state, lastroundkeys=[], encrypt=None, mimiclastround=True):
                 state=MC(state)
     return state
 
-def check(output, encrypt=None, verbose=1, init=False, _intern={}):
+def check(output, encrypt=None, verbose=3, init=False, _intern={}):
     """
     Checks an output against a reference.
 
@@ -446,7 +446,6 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
     for idx in range(len(r9faults)):
         o = r9faults[idx]
-    # for o in r9faults:
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
         _, index=check(o, encrypt=encrypt, verbose=verbose)
@@ -499,6 +498,65 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     return key, idx, candidates
     # return None, idx, candidates
 
+def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, fixabsorb=False):
+    # candidates=[[], [], [], []]
+    # recovered=[False, False, False, False]
+    # key=[None]*16
+    _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
+    # for idx in range(len(r9faults)):
+    # o = r9faults[idx]
+    if not outputbeforelastrounds:
+        o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
+    _, index=check(o, encrypt=encrypt, verbose=verbose)
+    if verbose>1:
+        print("{}: group {}".format(o.hex(), index))
+    if index is not None:
+        if recovered[index]:
+            return
+        _absorb(index, o, candidates, ref, encrypt, verbose, fixabsorb)
+        c = candidates
+        if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
+            recovered[index]=True
+            Keys=[k for k, y in zip (range(16), _AesFaultMaps[encrypt][index]) if y]
+            Gold=[g for g, y in zip (ref, _AesFaultMaps[encrypt][index]) if y]
+            for j in range(4):
+                    key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
+            if verbose>1:
+                print("Round key bytes recovered:")
+                print(''.join(["%02X" % x if x is not None else ".." for x in key]))
+        if False in recovered:
+            return
+        if (len(lastroundkeys)>0 or outputbeforelastrounds) and encrypt:
+            key=MC(key)
+        if encrypt:
+            if len(lastroundkeys)==0:
+                if outputbeforelastrounds:
+                    if verbose>0:
+                        print("Round key before last known rounds found:")
+                else:
+                    if verbose>0:
+                        print("Last round key #N found:")
+            else:
+                if verbose>0:
+                    print("Round key #N-%i found:" % (len(lastroundkeys)))
+        else:
+            if len(lastroundkeys)==0:
+                if outputbeforelastrounds:
+                    if verbose>0:
+                        print("Round key after first known rounds found:")
+                else:
+                    if verbose>0:
+                        print("First round key #0 found:")
+            else:
+                if verbose>0:
+                    print("Round key #%i found:" % (len(lastroundkeys)))
+        roundkey = ''.join(["%02X" % x for x in key])
+        if verbose>0:
+            print(roundkey)
+        return key
+    return key
+    # return None, idx, candidates
+
 def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
     # if index == 0:
     #     print('')
@@ -524,13 +582,13 @@ def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
         for lc0,lc1,lc2,lc3 in Cands:
             for loc0,loc1,loc2,loc3 in candidates[index]:
                 if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
-                    if index == 0:
-                        print('>',lc0,lc1,lc2,lc3)
-                        print('&',loc0,loc1,loc2,loc3 )
-                        print('=',((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)) )
+                    # if index == 0:
+                    #     print('>',lc0,lc1,lc2,lc3)
+                    #     print('&',loc0,loc1,loc2,loc3 )
+                    #     print('=',((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)) )
                     new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
                     candidates[index]=new_candidates
-                    return 
+                    # return 
         if fixabsorb:
             if new_candidates != []:
                 candidates[index]=new_candidates
