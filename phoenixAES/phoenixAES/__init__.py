@@ -428,7 +428,7 @@ def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastroun
             continue
     return crack_bytes(r9faults, ref, lastroundkeys=lastroundkeys, encrypt=encrypt, outputbeforelastrounds=outputbeforelastrounds, verbose=verbose)
 
-def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
+def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, fixabsorb=False):
     """
     Tries to crack a round key given faulty outputs glitched on round 9
 
@@ -455,7 +455,7 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
         if index is not None:
             if recovered[index]:
                 continue
-            _absorb(index, o, candidates, ref, encrypt, verbose)
+            _absorb(index, o, candidates, ref, encrypt, verbose, fixabsorb)
             c = candidates
             if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
                 recovered[index]=True
@@ -499,23 +499,49 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     return key, idx, candidates
     # return None, idx, candidates
 
-def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
+def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
+    # if index == 0:
+    #     print('')
     Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
     Keys=[  k for    k, y in zip (        range(16), _AesFaultMaps[encrypt][index]) if y]
     Cands  = _get_cands(Diff, Keys, [[14, 9,  13, 11], [2, 3, 1, 1]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, [[11, 14, 9,  13], [3, 1, 1, 2]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, [[13, 11, 14, 9] , [1, 1, 2, 3]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][encrypt], encrypt, verbose)
+    # if index == 0:
+    #     print('Cands', len(candidates[index]))
+    #     # for x in Cands:
+    #     #     print(x)
     if not candidates[index]:
         candidates[index] = Cands
     else:
+        # if index == 0:
+        #     print('candidates[index]')
+        #     # for x in candidates[index]:
+        #     #     print(x)
         # merge self.candidates[index] and Cands
         new_candidates=[]
         for lc0,lc1,lc2,lc3 in Cands:
             for loc0,loc1,loc2,loc3 in candidates[index]:
                 if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
+                    if index == 0:
+                        print('>',lc0,lc1,lc2,lc3)
+                        print('&',loc0,loc1,loc2,loc3 )
+                        print('=',((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)) )
                     new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
-        candidates[index]=new_candidates
+                    candidates[index]=new_candidates
+                    return 
+        if fixabsorb:
+            if new_candidates != []:
+                candidates[index]=new_candidates
+            else:
+                candidates[index] += Cands
+        else:
+            candidates[index]=new_candidates
+    # if index == 0:
+    #     print('candidates[index] merged')
+    #     # for x in candidates[index]:
+    #     #     print(x)
 
 def _get_cands(Diff, Keys, tmult, encrypt, verbose):
     candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
