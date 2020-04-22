@@ -444,7 +444,9 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     recovered=[False, False, False, False]
     key=[None]*16
     _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
-    for o in r9faults:
+    for idx in range(len(r9faults)):
+        o = r9faults[idx]
+    # for o in r9faults:
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
         _, index=check(o, encrypt=encrypt, verbose=verbose)
@@ -471,23 +473,30 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
             if encrypt:
                 if len(lastroundkeys)==0:
                     if outputbeforelastrounds:
-                        print("Round key before last known rounds found:")
+                        if verbose>0:
+                            print("Round key before last known rounds found:")
                     else:
-                        print("Last round key #N found:")
+                        if verbose>0:
+                            print("Last round key #N found:")
                 else:
-                    print("Round key #N-%i found:" % (len(lastroundkeys)))
+                    if verbose>0:
+                        print("Round key #N-%i found:" % (len(lastroundkeys)))
             else:
                 if len(lastroundkeys)==0:
                     if outputbeforelastrounds:
-                        print("Round key after first known rounds found:")
+                        if verbose>0:
+                            print("Round key after first known rounds found:")
                     else:
-                        print("First round key #0 found:")
+                        if verbose>0:
+                            print("First round key #0 found:")
                 else:
-                    print("Round key #%i found:" % (len(lastroundkeys)))
+                    if verbose>0:
+                        print("Round key #%i found:" % (len(lastroundkeys)))
             roundkey = ''.join(["%02X" % x for x in key])
-            print(roundkey)
-            return roundkey
-    return None
+            if verbose>0:
+                print(roundkey)
+            return bytes(key), idx
+    return None, idx
 
 def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
     Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
