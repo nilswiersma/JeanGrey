@@ -448,9 +448,10 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
         o = r9faults[idx]
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
-        _, index=check(o, encrypt=encrypt, verbose=verbose)
+        tmp, index=check(o, encrypt=encrypt, verbose=verbose)
         if verbose>1:
             print("{}: group {}".format(o.hex(), index))
+        # print(tmp,index)
         if index is not None:
             if recovered[index]:
                 continue
@@ -567,7 +568,7 @@ def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
     Cands += _get_cands(Diff, Keys, [[13, 11, 14, 9] , [1, 1, 2, 3]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][encrypt], encrypt, verbose)
     # if index == 0:
-    #     print('Cands', len(candidates[index]))
+    # print('Cands', index, len(candidates[index]))
     #     # for x in Cands:
     #     #     print(x)
     if not candidates[index]:
@@ -603,9 +604,14 @@ def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
 
 def _get_cands(Diff, Keys, tmult, encrypt, verbose):
     candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
+    # print('candi', [[hex(y) for y in x] for x in candi])
     z = set(candi[0]).intersection(*candi[1:])
+    # print('z', [hex(x) for x in z])
     candi = [[t for t in enumerate(ci) if t[1] in z] for ci in candi]
+    # print('candi', candi)
     cands = [[set([j for j,x in ci if x==zi]) for ci in candi] for zi in z]
+    # for kc0,kc1,kc2,kc3 in cands:
+    #     print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
     if verbose > 2:
         for kc0,kc1,kc2,kc3 in cands:
             print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
