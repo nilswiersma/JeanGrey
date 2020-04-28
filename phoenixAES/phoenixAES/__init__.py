@@ -34,6 +34,12 @@ def int2bytes(state):
 def bytes2int(state):
     return int.from_bytes(state, byteorder='big', signed=False)
 
+def dump_hex_list(l):
+    return ["%02x" % x for x in l]
+
+def dump_set_list(l):
+    return [dump_hex_list(x) for x in l]
+
 _AesFaultMaps= [
 # AES decryption
  [[True, False, False, False, False, True, False, False, False, False, True, False, False, False, False, True],
@@ -346,10 +352,195 @@ def rewind(state, lastroundkeys=[], encrypt=None, mimiclastround=True):
                 state=MC(state)
     return state
 
+def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
+    Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
+    Keys=[  k for    k, y in zip (        range(16), _AesFaultMaps[encrypt][index]) if y]
+    Cands  = _get_cands(Diff, Keys, [[14, 9,  13, 11], [2, 3, 1, 1]][encrypt], encrypt, verbose)
+    Cands += _get_cands(Diff, Keys, [[11, 14, 9,  13], [3, 1, 1, 2]][encrypt], encrypt, verbose)
+    Cands += _get_cands(Diff, Keys, [[13, 11, 14, 9] , [1, 1, 2, 3]][encrypt], encrypt, verbose)
+    Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][encrypt], encrypt, verbose)
+
+    if not candidates[index]:
+        candidates[index] = Cands
+    else:
+        # merge self.candidates[index] and Cands
+        new_candidates=[]
+        for lc0,lc1,lc2,lc3 in Cands:
+            for loc0,loc1,loc2,loc3 in candidates[index]:
+                if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
+                    new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
+        if new_candidates != []:
+            candidates[index]=new_candidates
+        else:
+            candidates[index] += Cands
+
+def _get_cands(Diff, Keys, tmult, encrypt, verbose):
+    candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
+    z = set(candi[0]).intersection(*candi[1:])
+    candi = [[t for t in enumerate(ci) if t[1] in z] for ci in candi]
+    cands = [[[j for j,x in ci if x==zi] for ci in candi] for zi in z]
+    cands = [[set([j for j,x in ci if x==zi]) for ci in candi] for zi in z]
+    if verbose > 2:
+        for kc0,kc1,kc2,kc3 in cands:
+            print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
+    return cands
+
+def _get_compat(diff, tmult, encrypt):
+    ibox = [_AesSBox, _AesInvSBox][encrypt]
+    itab = [0]*256
+    for i,mi in enumerate(_AesMult[tmult]):
+        itab[mi] = i
+    return [itab[ibox[j^diff]^ibox_j] for j,ibox_j in enumerate(ibox)]
+
+
+class ByteCracker(object):
+    """docstring for ByteCracker"""
+    def __init__(self, ref, encrypt, verbose):
+        self.encrypt = encrypt
+        self.verbose = verbose
+        self.ref = ref
+        self._intern = {}
+
+        self.idx = 0
+
+        self.r9faults = []
+        self.candidates=[[], [], [], []]
+        self.recovered=[False, False, False, False]
+        self.key=[None]*16
+        self.lastroundkeys=[]
+        print(self.check(ref, init=True))
+        
+    def check(self, output, init=False):
+        """
+        Checks an output against a reference.
+
+        The first call to the function sets the internal reference as the given output
+        :param output: potentially faulty output
+        :param encrypt: True if encryption, False if decryption
+        :param verbose: verbosity level, prints only if verbose>2
+        :param init: if True, resets the internal reference as the given output
+        :returns: a FaultStatus
+        """
+        if init:
+            self._intern.clear()
+
+        if not self._intern:
+            self._intern['goldenref']=output
+            if self.verbose>2:
+                print("FI: record golden ref")
+            return (FaultStatus.NoFault, None)
+        if output == self._intern['goldenref']:
+            if self.verbose>2:
+                print("FI: no impact")
+            return (FaultStatus.NoFault, None)
+        diff=xor(output,self._intern['goldenref'])
+        diffmap=[x!=0 for x in diff]
+        diffsum=sum(diffmap)
+        if diffsum==4:
+            if self.encrypt is not False and diffmap in _AesFaultMaps[True]:
+                if self.verbose>2:
+                    print("FI: good candidate for encryption!")
+                return (FaultStatus.GoodEncFault, _AesFaultMaps[True].index(diffmap))
+            elif self.encrypt is not True and diffmap in _AesFaultMaps[False]:
+                if self.verbose>2:
+                    print("FI: good candidate for decryption!")
+                return (FaultStatus.GoodDecFault, _AesFaultMaps[False].index(diffmap))
+            else:
+                if self.verbose>2:
+                    print("FI: wrong candidate  (%2i)" % diffsum)
+                return (FaultStatus.WrongFault, None)
+        elif diffsum<4:
+            if self.verbose>2:
+                print("FI: too few impact  (%2i)" % diffsum)
+            return (FaultStatus.MinorFault, None)
+        else:
+            if self.verbose>2:
+                print("FI: too much impact (%2i)" % diffsum)
+            return (FaultStatus.MajorFault, None)
+
+    def crack_bytes(self, r9fault, outputbeforelastrounds=False):
+        """
+        Tries to crack a round key given faulty outputs glitched on round 9
+
+        :param r9faults: list of glitched outputs, as bytes
+        :param ref: reference output, as bytes
+        :param lastroundkeys: a list of round keys for the rounds to rewind, as 16-byte bytearray
+        :param encrypt: True if encryption, False if decryption.
+        :param outputbeforelastrounds:
+        :param verbose: verbosity level
+        :returns: cracked round key as hexstring or None
+        """
+        # candidates=[[], [], [], []]
+        # recovered=[False, False, False, False]
+        # key=[None]*16
+        # _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
+        # for idx in range(len(r9faults)):
+            # o = r9faults[idx]
+        self.idx += 1
+        o = r9fault
+        if not outputbeforelastrounds:
+            o=rewind(o, lastroundkeys=self.lastroundkeys, encrypt=self.encrypt)
+        t, index=self.check(o)
+        # if index == 0:
+        #     print(self.idx, t)
+        # else:
+        #     return self.key, self.idx, self.candidates
+        if self.verbose>1:
+            print("{}: group {}".format(o.hex(), index))
+        # print(tmp,index)
+        if index is not None:
+            if self.recovered[index]:
+                return self.key, self.idx, self.candidates
+            _absorb(index, o, self.candidates, self.ref, self.encrypt, self.verbose)
+            c = self.candidates
+            if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
+                self.recovered[index]=True
+                Keys=[k for k, y in zip (range(16), _AesFaultMaps[self.encrypt][index]) if y]
+                Gold=[g for g, y in zip (self.ref, _AesFaultMaps[self.encrypt][index]) if y]
+                for j in range(4):
+                    self.key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
+                # print("Round key bytes self.recovered:")
+                # print(c[index])
+                # print(''.join(["%02X" % x if x is not None else ".." for x in key]))
+                if self.verbose>1:
+                    print("Round key bytes self.recovered:")
+                    print(''.join(["%02X" % x if x is not None else ".." for x in self.key]))
+            if False in self.recovered:
+                return self.key, self.idx, self.candidates
+            if (len(self.lastroundkeys)>0 or outputbeforelastrounds) and self.encrypt:
+                self.key=MC(self.key)
+            if self.encrypt:
+                if len(self.lastroundkeys)==0:
+                    if outputbeforelastrounds:
+                        if self.verbose>0:
+                            print("Round key before last known rounds found:")
+                    else:
+                        if self.verbose>0:
+                            print("Last round key #N found:")
+                else:
+                    if self.verbose>0:
+                        print("Round key #N-%i found:" % (len(self.lastroundkeys)))
+            else:
+                if len(self.lastroundkeys)==0:
+                    if outputbeforelastrounds:
+                        if self.verbose>0:
+                            print("Round key after first known rounds found:")
+                    else:
+                        if self.verbose>0:
+                            print("First round key #0 found:")
+                else:
+                    if self.verbose>0:
+                        print("Round key #%i found:" % (len(self.lastroundkeys)))
+            roundkey = ''.join(["%02X" % x for x in self.key])
+            if self.verbose>0:
+                print(roundkey)
+            return self.key, self.idx, self.candidates
+        return self.key, self.idx, self.candidates
+    # return None, idx, candidates
+
 def check(output, encrypt=None, verbose=3, init=False, _intern={}):
     """
     Checks an output against a reference.
-
     The first call to the function sets the internal reference as the given output
     :param output: potentially faulty output
     :param encrypt: True if encryption, False if decryption
@@ -428,7 +619,7 @@ def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastroun
             continue
     return crack_bytes(r9faults, ref, lastroundkeys=lastroundkeys, encrypt=encrypt, outputbeforelastrounds=outputbeforelastrounds, verbose=verbose)
 
-def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, fixabsorb=False):
+def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
     """
     Tries to crack a round key given faulty outputs glitched on round 9
 
@@ -448,21 +639,28 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
         o = r9faults[idx]
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
-        tmp, index=check(o, encrypt=encrypt, verbose=verbose)
+        t, index=check(o, encrypt=encrypt, verbose=verbose)
+        # if index == 0:
+        #     print(idx, t)
+        # else:
+        #     continue
         if verbose>1:
             print("{}: group {}".format(o.hex(), index))
         # print(tmp,index)
         if index is not None:
             if recovered[index]:
                 continue
-            _absorb(index, o, candidates, ref, encrypt, verbose, fixabsorb)
+            _absorb(index, o, candidates, ref, encrypt, verbose)
             c = candidates
             if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
                 recovered[index]=True
                 Keys=[k for k, y in zip (range(16), _AesFaultMaps[encrypt][index]) if y]
                 Gold=[g for g, y in zip (ref, _AesFaultMaps[encrypt][index]) if y]
                 for j in range(4):
-                        key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
+                    key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
+                # print("Round key bytes recovered:")
+                # print(c[index])
+                # print(''.join(["%02X" % x if x is not None else ".." for x in key]))
                 if verbose>1:
                     print("Round key bytes recovered:")
                     print(''.join(["%02X" % x if x is not None else ".." for x in key]))
@@ -499,7 +697,7 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     return key, idx, candidates
     # return None, idx, candidates
 
-def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, fixabsorb=False):
+def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
     # candidates=[[], [], [], []]
     # recovered=[False, False, False, False]
     # key=[None]*16
@@ -514,7 +712,7 @@ def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], en
     if index is not None:
         if recovered[index]:
             return
-        _absorb(index, o, candidates, ref, encrypt, verbose, fixabsorb)
+        _absorb(index, o, candidates, ref, encrypt, verbose)
         c = candidates
         if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
             recovered[index]=True
@@ -558,71 +756,7 @@ def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], en
     return key
     # return None, idx, candidates
 
-def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, fixabsorb):
-    # if index == 0:
-    #     print('')
-    Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
-    Keys=[  k for    k, y in zip (        range(16), _AesFaultMaps[encrypt][index]) if y]
-    Cands  = _get_cands(Diff, Keys, [[14, 9,  13, 11], [2, 3, 1, 1]][encrypt], encrypt, verbose)
-    Cands += _get_cands(Diff, Keys, [[11, 14, 9,  13], [3, 1, 1, 2]][encrypt], encrypt, verbose)
-    Cands += _get_cands(Diff, Keys, [[13, 11, 14, 9] , [1, 1, 2, 3]][encrypt], encrypt, verbose)
-    Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][encrypt], encrypt, verbose)
-    # if index == 0:
-    # print('Cands', index, len(candidates[index]))
-    #     # for x in Cands:
-    #     #     print(x)
-    if not candidates[index]:
-        candidates[index] = Cands
-    else:
-        # if index == 0:
-        #     print('candidates[index]')
-        #     # for x in candidates[index]:
-        #     #     print(x)
-        # merge self.candidates[index] and Cands
-        new_candidates=[]
-        for lc0,lc1,lc2,lc3 in Cands:
-            for loc0,loc1,loc2,loc3 in candidates[index]:
-                if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
-                    # if index == 0:
-                    #     print('>',lc0,lc1,lc2,lc3)
-                    #     print('&',loc0,loc1,loc2,loc3 )
-                    #     print('=',((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)) )
-                    new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
-                    candidates[index]=new_candidates
-                    # return 
-        if fixabsorb:
-            if new_candidates != []:
-                candidates[index]=new_candidates
-            else:
-                candidates[index] += Cands
-        else:
-            candidates[index]=new_candidates
-    # if index == 0:
-    #     print('candidates[index] merged')
-    #     # for x in candidates[index]:
-    #     #     print(x)
 
-def _get_cands(Diff, Keys, tmult, encrypt, verbose):
-    candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
-    # print('candi', [[hex(y) for y in x] for x in candi])
-    z = set(candi[0]).intersection(*candi[1:])
-    # print('z', [hex(x) for x in z])
-    candi = [[t for t in enumerate(ci) if t[1] in z] for ci in candi]
-    # print('candi', candi)
-    cands = [[set([j for j,x in ci if x==zi]) for ci in candi] for zi in z]
-    # for kc0,kc1,kc2,kc3 in cands:
-    #     print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
-    if verbose > 2:
-        for kc0,kc1,kc2,kc3 in cands:
-            print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
-    return cands
-
-def _get_compat(diff, tmult, encrypt):
-    ibox = [_AesSBox, _AesInvSBox][encrypt]
-    itab = [0]*256
-    for i,mi in enumerate(_AesMult[tmult]):
-        itab[mi] = i
-    return [itab[ibox[j^diff]^ibox_j] for j,ibox_j in enumerate(ibox)]
 
 def convert_r8faults_file(r8_filename, r9_filename, encrypt=True):
     """
@@ -647,13 +781,22 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
     :param ref: the reference output bytearray
     :returns: a list of glitched outputs as bytearrays
     """
+
+    t, index=check(ref, encrypt=encrypt, verbose=0, init=True)
+    print(ref.hex(), t,index)
+
     r9faults=[]
     for f8 in r8faults:
+        print(f8.hex(), check(f8, encrypt=encrypt, verbose=0))
         if encrypt:
             r9faults.append(bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 7]+f8[ 7: 8]+ref[ 8:10]+f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16]))
+            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
             r9faults.append(bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 4]+f8[ 4: 5]+ref[ 5:11]+f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16]))
+            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
             r9faults.append(bytearray(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 5]+f8[ 5: 6]+ref[ 6: 8]+f8[ 8: 9]+ref[ 9:15]+f8[15:16]+ref[16:16]))
+            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
             r9faults.append(bytearray(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 6]+f8[ 6: 7]+ref[ 7: 9]+f8[ 9:10]+ref[10:12]+f8[12:13]+ref[13:16]))
+            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
         else:
             r9faults.append(bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 5]+f8[ 5: 6]+ref[ 6:10]+f8[10:11]+ref[11:15]+f8[15:16]+ref[16:16]))
             r9faults.append(bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 6]+f8[ 6: 7]+ref[ 7:11]+f8[11:12]+ref[12:12]+f8[12:13]+ref[13:16]))
