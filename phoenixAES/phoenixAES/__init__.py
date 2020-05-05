@@ -22,6 +22,8 @@
 
 from enum import Enum
 
+import tqdm
+
 # Internally we're using lists of uint8_t ints
 # Here are a few helpers to convert other representations
 
@@ -214,6 +216,9 @@ None, [
 ], None
 ]
 
+def hexdot(key):
+    return ''.join([f'{x:02x}' if x is not None else ".." for x in key])
+
 def MC(state):
     """
     Applies AES MixColumns on AES state
@@ -367,8 +372,13 @@ def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
         new_candidates=[]
         for lc0,lc1,lc2,lc3 in Cands:
             for loc0,loc1,loc2,loc3 in candidates[index]:
-                if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
-                    new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
+                p0 = (lc0 & loc0)
+                p1 = (lc1 & loc1)
+                p2 = (lc2 & loc2)
+                p3 = (lc3 & loc3)
+                if p0 and p1 and p2 and p3:
+                    new_candidates.append((p0, p1, p2, p3))
+                    print(index, (p0, p1, p2, p3))
         if new_candidates != []:
             candidates[index]=new_candidates
         else:
@@ -401,15 +411,84 @@ class ByteCracker(object):
         self.ref = ref
         self._intern = {}
 
-        self.idx = 0
+        self.counter = 0
 
         self.r9faults = []
         self.candidates=[[], [], [], []]
+        self.solutions =[[], [], [], []]
         self.recovered=[False, False, False, False]
         self.key=[None]*16
         self.lastroundkeys=[]
+
         print(self.check(ref, init=True))
-        
+
+    def key_solutions(self):
+        ret = []
+        key = [None]*16
+
+        sol0 = self.solutions[0] if self.solutions[0] != [] else [[None]*4]
+        for kbs0 in sol0:
+            kis0 =[k for k, y in zip(range(16), _AesFaultMaps[1][0]) if y]
+            for ki, kb in zip(kis0, kbs0):
+                key[ki] = kb
+
+            sol1 = self.solutions[1] if self.solutions[1] != [] else [[None]*4]
+            for kbs1 in sol1:
+                kis1 =[k for k, y in zip(range(16), _AesFaultMaps[1][1]) if y]
+                for ki, kb in zip(kis1, kbs1):
+                    key[ki] = kb
+
+                sol2 = self.solutions[2] if self.solutions[2] != [] else [[None]*4]
+                for kbs2 in sol2:
+                    kis2 =[k for k, y in zip(range(16), _AesFaultMaps[1][2]) if y]
+                    for ki, kb in zip(kis2, kbs2):
+                        key[ki] = kb
+
+                    sol3 = self.solutions[3] if self.solutions[3] != [] else [[None]*4]
+                    for kbs3 in sol3:
+                        kis3 =[k for k, y in zip(range(16), _AesFaultMaps[1][3]) if y]
+                        for ki, kb in zip(kis3, kbs3):
+                            key[ki] = kb
+                        ret.append(list(key))
+        return ret
+
+    def _absorb(self, index, o):
+        new_sol = False
+
+        Diff=[x^g for x, g, y in zip ( o, self.ref, _AesFaultMaps[self.encrypt][index]) if y]
+        Keys=[  k for    k, y in zip (   range(16), _AesFaultMaps[self.encrypt][index]) if y]
+        Gold=[  g for    g, y in zip (    self.ref, _AesFaultMaps[self.encrypt][index]) if y]
+
+        Cands  = _get_cands(Diff, Keys, [[14, 9,  13, 11], [2, 3, 1, 1]][self.encrypt], self.encrypt, self.verbose)
+        Cands += _get_cands(Diff, Keys, [[11, 14, 9,  13], [3, 1, 1, 2]][self.encrypt], self.encrypt, self.verbose)
+        Cands += _get_cands(Diff, Keys, [[13, 11, 14, 9] , [1, 1, 2, 3]][self.encrypt], self.encrypt, self.verbose)
+        Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][self.encrypt], self.encrypt, self.verbose)
+
+        if not self.candidates[index]:
+            self.candidates[index] = Cands
+        else:
+            # merge self.candidates[index] and Cands
+            new_candidates=[]
+            for lc0,lc1,lc2,lc3 in Cands:
+                for loc0,loc1,loc2,loc3 in self.candidates[index]:
+                    p0 = (lc0 & loc0)
+                    p1 = (lc1 & loc1)
+                    p2 = (lc2 & loc2)
+                    p3 = (lc3 & loc3)
+                    if p0 and p1 and p2 and p3:
+                        if len(p0)==1 and len(p1)==1 and len(p2)==1 and len(p3)==1:
+                            solution = tuple(list(x)[0] ^ y for x,y in zip([p0, p1, p2, p3],Gold))
+                            if solution not in self.solutions[index]:
+                                self.solutions[index].append(solution)
+                                new_sol = True
+                                # print('+++')
+                                print('\r',index, p0, p1, p2, p3, [f'{x:02x}' for x in solution])
+                                # print(solution)
+                                # print(self.solutions[index])
+                                # print('---')
+            self.candidates[index] += Cands
+        return new_sol
+
     def check(self, output, init=False):
         """
         Checks an output against a reference.
@@ -476,66 +555,28 @@ class ByteCracker(object):
         # _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
         # for idx in range(len(r9faults)):
             # o = r9faults[idx]
-        self.idx += 1
         o = r9fault
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=self.lastroundkeys, encrypt=self.encrypt)
         t, index=self.check(o)
-        # if index == 0:
-        #     print(self.idx, t)
-        # else:
-        #     return self.key, self.idx, self.candidates
+
         if self.verbose>1:
             print("{}: group {}".format(o.hex(), index))
-        # print(tmp,index)
+
+        new_sol = False
+
         if index is not None:
-            if self.recovered[index]:
-                return self.key, self.idx, self.candidates
-            _absorb(index, o, self.candidates, self.ref, self.encrypt, self.verbose)
-            c = self.candidates
-            if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
-                self.recovered[index]=True
-                Keys=[k for k, y in zip (range(16), _AesFaultMaps[self.encrypt][index]) if y]
-                Gold=[g for g, y in zip (self.ref, _AesFaultMaps[self.encrypt][index]) if y]
-                for j in range(4):
-                    self.key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
-                # print("Round key bytes self.recovered:")
-                # print(c[index])
-                # print(''.join(["%02X" % x if x is not None else ".." for x in key]))
-                if self.verbose>1:
-                    print("Round key bytes self.recovered:")
-                    print(''.join(["%02X" % x if x is not None else ".." for x in self.key]))
-            if False in self.recovered:
-                return self.key, self.idx, self.candidates
-            if (len(self.lastroundkeys)>0 or outputbeforelastrounds) and self.encrypt:
-                self.key=MC(self.key)
-            if self.encrypt:
-                if len(self.lastroundkeys)==0:
-                    if outputbeforelastrounds:
-                        if self.verbose>0:
-                            print("Round key before last known rounds found:")
-                    else:
-                        if self.verbose>0:
-                            print("Last round key #N found:")
-                else:
-                    if self.verbose>0:
-                        print("Round key #N-%i found:" % (len(self.lastroundkeys)))
-            else:
-                if len(self.lastroundkeys)==0:
-                    if outputbeforelastrounds:
-                        if self.verbose>0:
-                            print("Round key after first known rounds found:")
-                    else:
-                        if self.verbose>0:
-                            print("First round key #0 found:")
-                else:
-                    if self.verbose>0:
-                        print("Round key #%i found:" % (len(self.lastroundkeys)))
-            roundkey = ''.join(["%02X" % x for x in self.key])
-            if self.verbose>0:
-                print(roundkey)
-            return self.key, self.idx, self.candidates
-        return self.key, self.idx, self.candidates
+            if not self.recovered[index]:
+            #     return self.key, self.idx, self.candidates
+                self.counter += 1
+                new_sol = self._absorb(index, o)
+
+        # if [] not in self.solutions:
+        #     print('solution for each key part!')
+        #     for solution in self.solutions:
+        #         print(solution)
+        #     return True
+        return new_sol
     # return None, idx, candidates
 
 def check(output, encrypt=None, verbose=3, init=False, _intern={}):
@@ -634,12 +675,16 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     candidates=[[], [], [], []]
     recovered=[False, False, False, False]
     key=[None]*16
-    _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
+    t, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
+    # print(t)
+    idx=0
     for idx in range(len(r9faults)):
+    # for idx in tqdm.trange(len(r9faults)):
         o = r9faults[idx]
         if not outputbeforelastrounds:
             o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
         t, index=check(o, encrypt=encrypt, verbose=verbose)
+        # print(idx, o.hex(), t)
         # if index == 0:
         #     print(idx, t)
         # else:
@@ -657,6 +702,10 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
                 Keys=[k for k, y in zip (range(16), _AesFaultMaps[encrypt][index]) if y]
                 Gold=[g for g, y in zip (ref, _AesFaultMaps[encrypt][index]) if y]
                 for j in range(4):
+                    # print(list(c[index][0][j]))
+                    # print(list(c[index][0][j])[0])
+                    # print(Gold[j])
+                    # print(list(c[index][0][j])[0] ^ Gold[j])
                     key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
                 # print("Round key bytes recovered:")
                 # print(c[index])
@@ -697,66 +746,6 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     return key, idx, candidates
     # return None, idx, candidates
 
-def crack_bytes_rolling(o, ref, candidates, recovered, key, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
-    # candidates=[[], [], [], []]
-    # recovered=[False, False, False, False]
-    # key=[None]*16
-    _, index=check(ref, encrypt=encrypt, verbose=verbose, init=True)
-    # for idx in range(len(r9faults)):
-    # o = r9faults[idx]
-    if not outputbeforelastrounds:
-        o=rewind(o, lastroundkeys=lastroundkeys, encrypt=encrypt)
-    _, index=check(o, encrypt=encrypt, verbose=verbose)
-    if verbose>1:
-        print("{}: group {}".format(o.hex(), index))
-    if index is not None:
-        if recovered[index]:
-            return
-        _absorb(index, o, candidates, ref, encrypt, verbose)
-        c = candidates
-        if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
-            recovered[index]=True
-            Keys=[k for k, y in zip (range(16), _AesFaultMaps[encrypt][index]) if y]
-            Gold=[g for g, y in zip (ref, _AesFaultMaps[encrypt][index]) if y]
-            for j in range(4):
-                    key[Keys[j]]=list(c[index][0][j])[0] ^ Gold[j]
-            if verbose>1:
-                print("Round key bytes recovered:")
-                print(''.join(["%02X" % x if x is not None else ".." for x in key]))
-        if False in recovered:
-            return
-        if (len(lastroundkeys)>0 or outputbeforelastrounds) and encrypt:
-            key=MC(key)
-        if encrypt:
-            if len(lastroundkeys)==0:
-                if outputbeforelastrounds:
-                    if verbose>0:
-                        print("Round key before last known rounds found:")
-                else:
-                    if verbose>0:
-                        print("Last round key #N found:")
-            else:
-                if verbose>0:
-                    print("Round key #N-%i found:" % (len(lastroundkeys)))
-        else:
-            if len(lastroundkeys)==0:
-                if outputbeforelastrounds:
-                    if verbose>0:
-                        print("Round key after first known rounds found:")
-                else:
-                    if verbose>0:
-                        print("First round key #0 found:")
-            else:
-                if verbose>0:
-                    print("Round key #%i found:" % (len(lastroundkeys)))
-        roundkey = ''.join(["%02X" % x for x in key])
-        if verbose>0:
-            print(roundkey)
-        return key
-    return key
-    # return None, idx, candidates
-
-
 
 def convert_r8faults_file(r8_filename, r9_filename, encrypt=True):
     """
@@ -783,23 +772,53 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
     """
 
     t, index=check(ref, encrypt=encrypt, verbose=0, init=True)
-    print(ref.hex(), t,index)
-
+    # print(ref.hex(), t,index)
+    good_bad = [0,0]
     r9faults=[]
     for f8 in r8faults:
-        print(f8.hex(), check(f8, encrypt=encrypt, verbose=0))
+        # print(ref.hex(), check(ref, encrypt=encrypt, verbose=0))
+        # print(f8.hex(), check(f8, encrypt=encrypt, verbose=0))
         if encrypt:
-            r9faults.append(bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 7]+f8[ 7: 8]+ref[ 8:10]+f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16]))
-            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
-            r9faults.append(bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 4]+f8[ 4: 5]+ref[ 5:11]+f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16]))
-            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
-            r9faults.append(bytearray(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 5]+f8[ 5: 6]+ref[ 6: 8]+f8[ 8: 9]+ref[ 9:15]+f8[15:16]+ref[16:16]))
-            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
-            r9faults.append(bytearray(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 6]+f8[ 6: 7]+ref[ 7: 9]+f8[ 9:10]+ref[10:12]+f8[12:13]+ref[13:16]))
-            print(r9faults[-1].hex(), check(r9faults[-1], encrypt=encrypt, verbose=0))
+            r9 = bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 7]+f8[ 7: 8]+ref[ 8:10]+f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16])
+            t,i = check(r9, encrypt=encrypt, verbose=0)
+            # print(t,i)
+            if t == FaultStatus.GoodEncFault:
+              r9faults.append(r9)
+              good_bad[0] += 1
+            else:
+              # print(t)
+              good_bad[1] += 1
+            r9 = bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 4]+f8[ 4: 5]+ref[ 5:11]+f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16])
+            t,i = check(r9, encrypt=encrypt, verbose=0)
+            # print(t,i)
+            if t == FaultStatus.GoodEncFault:
+              r9faults.append(r9)
+              good_bad[0] += 1
+            else:
+              # print(t)
+              good_bad[1] += 1
+            r9 = bytearray(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 5]+f8[ 5: 6]+ref[ 6: 8]+f8[ 8: 9]+ref[ 9:15]+f8[15:16]+ref[16:16])
+            t,i = check(r9, encrypt=encrypt, verbose=0)
+            # print(t,i)
+            if t == FaultStatus.GoodEncFault:
+              r9faults.append(r9)
+              good_bad[0] += 1
+            else:
+              # print(t)
+              good_bad[1] += 1
+            r9 = bytearray(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 6]+f8[ 6: 7]+ref[ 7: 9]+f8[ 9:10]+ref[10:12]+f8[12:13]+ref[13:16])
+            t,i = check(r9, encrypt=encrypt, verbose=0)
+            # print(t,i)
+            if t == FaultStatus.GoodEncFault:
+              r9faults.append(r9)
+              good_bad[0] += 1
+            else:
+              # print(t)
+              good_bad[1] += 1
         else:
             r9faults.append(bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 5]+f8[ 5: 6]+ref[ 6:10]+f8[10:11]+ref[11:15]+f8[15:16]+ref[16:16]))
             r9faults.append(bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 6]+f8[ 6: 7]+ref[ 7:11]+f8[11:12]+ref[12:12]+f8[12:13]+ref[13:16]))
             r9faults.append(bytearray(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 7]+f8[ 7: 8]+ref[ 8: 8]+f8[ 8: 9]+ref[ 9:13]+f8[13:14]+ref[14:16]))
             r9faults.append(bytearray(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 4]+f8[ 4: 5]+ref[ 5: 9]+f8[ 9:10]+ref[10:14]+f8[14:15]+ref[15:16]))
+    print(good_bad)
     return r9faults
