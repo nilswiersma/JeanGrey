@@ -22,7 +22,7 @@
 
 from enum import Enum
 
-import tqdm
+# import tqdm
 
 # Internally we're using lists of uint8_t ints
 # Here are a few helpers to convert other representations
@@ -388,8 +388,13 @@ def _get_cands(Diff, Keys, tmult, encrypt, verbose):
     candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
     z = set(candi[0]).intersection(*candi[1:])
     candi = [[t for t in enumerate(ci) if t[1] in z] for ci in candi]
-    cands = [[[j for j,x in ci if x==zi] for ci in candi] for zi in z]
-    cands = [[set([j for j,x in ci if x==zi]) for ci in candi] for zi in z]
+    cands = [tuple(set([j for j,x in ci if x==zi]) for ci in candi) for zi in z]
+    # cands = []
+    # for zi in z:
+    #     c = tuple(set([j for j,x in ci if x==zi]) for ci in candi)
+    #     if c in cands:
+    #         print(c in cands)
+    #     cands.append(c)
     if verbose > 2:
         for kc0,kc1,kc2,kc3 in cands:
             print ("K%x:" % Keys[0], ["%02X" % x for x in kc0], "K%x:" % Keys[1], ["%02X" % x for x in kc1],"K%x:" % Keys[2], ["%02X" % x for x in kc2],"K%x:" % Keys[3], ["%02X" % x for x in kc3])
@@ -465,29 +470,52 @@ class ByteCracker(object):
         Cands += _get_cands(Diff, Keys, [[9,  13, 11, 14], [1, 2, 3, 1]][self.encrypt], self.encrypt, self.verbose)
 
         if not self.candidates[index]:
-            self.candidates[index] = Cands
-        else:
+            self.candidates[index] = []
+        for c in Cands:
             # merge self.candidates[index] and Cands
-            new_candidates=[]
-            for lc0,lc1,lc2,lc3 in Cands:
-                for loc0,loc1,loc2,loc3 in self.candidates[index]:
-                    p0 = (lc0 & loc0)
-                    p1 = (lc1 & loc1)
-                    p2 = (lc2 & loc2)
-                    p3 = (lc3 & loc3)
-                    if p0 and p1 and p2 and p3:
-                        if len(p0)==1 and len(p1)==1 and len(p2)==1 and len(p3)==1:
-                            solution = tuple(list(x)[0] ^ y for x,y in zip([p0, p1, p2, p3],Gold))
-                            if solution not in self.solutions[index]:
-                                self.solutions[index].append(solution)
-                                new_sol = True
-                                # print('+++')
-                                print('\r',index, p0, p1, p2, p3, [f'{x:02x}' for x in solution])
-                                # print(solution)
-                                # print(self.solutions[index])
-                                # print('---')
-            self.candidates[index] += Cands
+            if c not in self.candidates[index]:
+                self.candidates[index].append(c)
+
+        for lc0,lc1,lc2,lc3 in Cands:
+            for loc0,loc1,loc2,loc3 in self.candidates[index]:
+                p0 = (lc0 & loc0)
+                p1 = (lc1 & loc1)
+                p2 = (lc2 & loc2)
+                p3 = (lc3 & loc3)
+                if p0 and p1 and p2 and p3:
+                    if len(p0)==1 and len(p1)==1 and len(p2)==1 and len(p3)==1:
+                        solution = tuple(list(x)[0] ^ y for x,y in zip([p0, p1, p2, p3],Gold))
+                        if solution not in self.solutions[index]:
+                            self.solutions[index].append(solution)
+                            new_sol = True
+                            if self.verbose>1:
+                                print(index, p0, p1, p2, p3, [f'{x:02x}' for x in solution])
         return new_sol
+
+        # if not self.candidates[index]:
+        #     self.candidates[index] = Cands
+        #     for c in Cands:
+        #         print(c)
+        # else:
+        #     # merge self.candidates[index] and Cands
+        #     # new_candidates=[]
+        #     for lc0,lc1,lc2,lc3 in Cands:
+        #         for loc0,loc1,loc2,loc3 in self.candidates[index]:
+        #             p0 = (lc0 & loc0)
+        #             p1 = (lc1 & loc1)
+        #             p2 = (lc2 & loc2)
+        #             p3 = (lc3 & loc3)
+        #             if p0 and p1 and p2 and p3:
+        #                 if len(p0)==1 and len(p1)==1 and len(p2)==1 and len(p3)==1:
+        #                     solution = tuple(list(x)[0] ^ y for x,y in zip([p0, p1, p2, p3],Gold))
+        #                     if solution not in self.solutions[index]:
+        #                         self.solutions[index].append(solution)
+        #                         new_sol = True
+        #                         # print('+++')
+        #                         if self.verbose>1:
+        #                             print(index, p0, p1, p2, p3, [f'{x:02x}' for x in solution])
+        #     self.candidates[index] += Cands
+        # return new_sol
 
     def check(self, output, init=False):
         """
@@ -779,7 +807,7 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
         # print(ref.hex(), check(ref, encrypt=encrypt, verbose=0))
         # print(f8.hex(), check(f8, encrypt=encrypt, verbose=0))
         if encrypt:
-            r9 = bytearray(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 7]+f8[ 7: 8]+ref[ 8:10]+f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16])
+            r9 = bytes(ref[ 0: 0]+f8[ 0: 1]+ref[ 1: 7]+f8[ 7: 8]+ref[ 8:10]+f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16])
             t,i = check(r9, encrypt=encrypt, verbose=0)
             # print(t,i)
             if t == FaultStatus.GoodEncFault:
@@ -788,7 +816,7 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
             else:
               # print(t)
               good_bad[1] += 1
-            r9 = bytearray(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 4]+f8[ 4: 5]+ref[ 5:11]+f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16])
+            r9 = bytes(ref[ 0: 1]+f8[ 1: 2]+ref[ 2: 4]+f8[ 4: 5]+ref[ 5:11]+f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16])
             t,i = check(r9, encrypt=encrypt, verbose=0)
             # print(t,i)
             if t == FaultStatus.GoodEncFault:
@@ -797,7 +825,7 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
             else:
               # print(t)
               good_bad[1] += 1
-            r9 = bytearray(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 5]+f8[ 5: 6]+ref[ 6: 8]+f8[ 8: 9]+ref[ 9:15]+f8[15:16]+ref[16:16])
+            r9 = bytes(ref[ 0: 2]+f8[ 2: 3]+ref[ 3: 5]+f8[ 5: 6]+ref[ 6: 8]+f8[ 8: 9]+ref[ 9:15]+f8[15:16]+ref[16:16])
             t,i = check(r9, encrypt=encrypt, verbose=0)
             # print(t,i)
             if t == FaultStatus.GoodEncFault:
@@ -806,7 +834,7 @@ def convert_r8faults_bytes(r8faults, ref, encrypt=True):
             else:
               # print(t)
               good_bad[1] += 1
-            r9 = bytearray(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 6]+f8[ 6: 7]+ref[ 7: 9]+f8[ 9:10]+ref[10:12]+f8[12:13]+ref[13:16])
+            r9 = bytes(ref[ 0: 3]+f8[ 3: 4]+ref[ 4: 6]+f8[ 6: 7]+ref[ 7: 9]+f8[ 9:10]+ref[10:12]+f8[12:13]+ref[13:16])
             t,i = check(r9, encrypt=encrypt, verbose=0)
             # print(t,i)
             if t == FaultStatus.GoodEncFault:
